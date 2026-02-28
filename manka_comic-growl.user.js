@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Comic-Growl 漫画下载器
 // @namespace    https://comic-growl.com/
-// @version      1.2.0
+// @version      1.3.0
 // @description  自动解码并下载 comic-growl.com 的漫画章节，支持右开书拼页模式
 // @author       manka
 // @match        https://comic-growl.com/*
@@ -10,7 +10,6 @@
 // @grant        unsafeWindow
 // @connect      comic-growl.com
 // @run-at       document-start
-// @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // ==/UserScript==
 
 (function () {
@@ -787,12 +786,34 @@
             return combined;
         }
 
-        // ─── Canvas → Blob (JPG 最高质量) ────────────────────────────────────────
+        // ─── Canvas → Blob (JPG 最高质量) ────────────────────────────────────
         function canvasToBlob(canvas) {
             return new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 1.0));
         }
 
-        // ─── 主下载流程 ──────────────────────────────────────────────────────────
+        // ─── 从页面标题提取文件夹名 ────────────────────────────────────────────
+        function getTitleName() {
+            const raw = document.title || '';
+            // 去掉网站名后缀（如「 | コミックグロウル」）
+            const clean = raw.split('|')[0].trim();
+            // 清除 Windows/Unix 路径非法字符
+            return (clean.replace(/[\\/:*?"<>|]/g, '_').trim()) || 'episode';
+        }
+
+        // ─── GM_download Blob 封装 ─────────────────────────────────────────────
+        function gmDownloadBlob(blob, fileName) {
+            return new Promise((resolve, reject) => {
+                const blobUrl = URL.createObjectURL(blob);
+                GM_download({
+                    url: blobUrl,
+                    name: fileName,
+                    onload: () => { URL.revokeObjectURL(blobUrl); resolve(); },
+                    onerror: e => { URL.revokeObjectURL(blobUrl); reject(new Error('GM_download 失败: ' + JSON.stringify(e))); },
+                });
+            });
+        }
+
+        // ─── 主下载流程 ──────────────────────────────────────────────────────────────
         document.getElementById('cgd-download-btn').addEventListener('click', async () => {
             const u1 = url1Input.value.trim();
             if (!u1) { showToast('⚠️ 请先填写 URL 1', 3000); return; }
@@ -813,54 +834,52 @@
                 }
 
                 const total = imageList.length;
-                const canvases = [];
+                const folderName = getTitleName();
 
-                for (let i = 0; i < total; i++) {
-                    const pct = 5 + Math.floor((i / total) * 70);
-                    setProgress(pct, `下载并解码 ${i + 1} / ${total}…`);
-                    const canvas = await downloadAndDecode(imageList[i]);
-                    canvases.push(canvas);
+                if (mode === 0) {
+                    // ── 不拼页：解码一张立即下载，内存占用最小 ──
+                    for (let i = 0; i < total; i++) {
+                        setProgress(
+                            Math.round((i / total) * 95) + 2,
+                            `下载并解码 ${i + 1} / ${total}…`
+                        );
+                        const canvas = await downloadAndDecode(imageList[i]);
+                        const blob = await canvasToBlob(canvas);
+                        canvas.width = 0; canvas.height = 0; // 释放 GPU
+                        const name = `${folderName}/page_${String(i + 1).padStart(3, '0')}.jpg`;
+                        await gmDownloadBlob(blob, name);
+                    }
+                } else {
+                    // ── 拼页模式：先全量解码，再拼页并逐张下载 ──
+                    const canvases = [];
+                    for (let i = 0; i < total; i++) {
+                        setProgress(
+                            5 + Math.floor((i / total) * 60),
+                            `下载并解码 ${i + 1} / ${total}…`
+                        );
+                        canvases.push(await downloadAndDecode(imageList[i]));
+                    }
+
+                    setProgress(66, '合并跨页…');
+                    const pages = combinePagesRightToLeft(canvases, mode);
+                    canvases.forEach(c => { c.width = 0; c.height = 0; });
+                    canvases.length = 0;
+
+                    for (let i = 0; i < pages.length; i++) {
+                        setProgress(
+                            68 + Math.round((i / pages.length) * 29),
+                            `下载跨页 ${i + 1} / ${pages.length}…`
+                        );
+                        const blob = await canvasToBlob(pages[i]);
+                        pages[i].width = 0; pages[i].height = 0;
+                        const name = `${folderName}/spread_${String(i + 1).padStart(3, '0')}.jpg`;
+                        await gmDownloadBlob(blob, name);
+                    }
                 }
 
-                setProgress(76, '合并跨页…');
-                const pages = combinePagesRightToLeft(canvases, mode);
-                // 拼页完成后立即释放所有原始 canvas 的 GPU 显存
-                canvases.forEach(c => { c.width = 0; c.height = 0; });
-                canvases.length = 0;
-
-                setProgress(78, '打包 ZIP…');
-                const zip = new JSZip();
-                const folder = zip.folder('pages');
-
-                for (let i = 0; i < pages.length; i++) {
-                    const pct = 78 + Math.floor((i / pages.length) * 18);
-                    setProgress(pct, `打包图片 ${i + 1} / ${pages.length}…`);
-                    const name = mode === 0
-                        ? `page_${String(i + 1).padStart(3, '0')}.jpg`
-                        : `spread_${String(i + 1).padStart(3, '0')}.jpg`;
-                    const blob = await canvasToBlob(pages[i]);
-                    folder.file(name, blob);
-                    // 转 Blob 后立即释放跨页 canvas 显存
-                    pages[i].width = 0;
-                    pages[i].height = 0;
-                }
-
-                setProgress(96, '生成 ZIP 文件…');
-                const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
-
-                // 生成文件名（从 URL 提取 episode ID）
-                const match = window.location.pathname.match(/episodes\/([^/]+)/);
-                const epId = match ? match[1] : 'episode';
-                const fileName = `comic-growl_${epId}.zip`;
-
-                const a = document.createElement('a');
-                a.href = URL.createObjectURL(zipBlob);
-                a.download = fileName;
-                a.click();
-                setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-
-                setProgress(100, `✅ 完成！共 ${pages.length} 张，文件名: ${fileName}`);
-                showToast(`✅ 下载完成: ${fileName}`, 5000);
+                const count = mode === 0 ? total : Math.ceil(total / 2);
+                setProgress(100, `✅ 完成！${count} 张已保入「${folderName}」文件夹`);
+                showToast(`✅ 完成！保入下载文件夹内「${folderName}」`, 6000);
             } catch (err) {
                 console.error('[Comic-Growl Downloader]', err);
                 showToast('❌ 出错: ' + err.message, 5000);
@@ -870,6 +889,7 @@
                 btn.textContent = '⬇ 开始下载';
             }
         });
+
 
         renderCapturedList();
 
