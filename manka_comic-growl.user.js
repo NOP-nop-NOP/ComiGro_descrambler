@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Comic-Growl 漫画下载器
 // @namespace    https://comic-growl.com/
-// @version      1.3.0
+// @version      1.4.0
 // @description  自动解码并下载 comic-growl.com 的漫画章节，支持右开书拼页模式
 // @author       manka
 // @homepage     https://github.com/NOP-nop-NOP/ComiGro_descrambler
@@ -802,13 +802,25 @@
             return (clean.replace(/[\\/:*?"<>|]/g, '_').trim()) || 'episode';
         }
 
-        // ─── GM_download Blob 封装 ─────────────────────────────────────────────
-        function gmDownloadBlob(blob, fileName) {
+        // ─── 文件写入工具（File System Access API + GM_download 降级）─────────────
+        async function pickSaveDir() {
+            if (!window.showDirectoryPicker) return null;
+            try { return await window.showDirectoryPicker({ mode: 'readwrite' }); }
+            catch (e) { return null; } // 用户取消
+        }
+
+        async function writeBlobToDir(blob, dirHandle, fileName) {
+            const fh = await dirHandle.getFileHandle(fileName, { create: true });
+            const w = await fh.createWritable();
+            await w.write(blob);
+            await w.close();
+        }
+
+        function gmDownloadBlobFallback(blob, fileName) {
             return new Promise((resolve, reject) => {
                 const blobUrl = URL.createObjectURL(blob);
                 GM_download({
-                    url: blobUrl,
-                    name: fileName,
+                    url: blobUrl, name: fileName,
                     onload: () => { URL.revokeObjectURL(blobUrl); resolve(); },
                     onerror: e => { URL.revokeObjectURL(blobUrl); reject(new Error('GM_download 失败: ' + JSON.stringify(e))); },
                 });
@@ -825,6 +837,22 @@
             btn.textContent = '处理中…';
 
             try {
+                // ── 先选目标文件夹（弹一次对话框）──
+                setProgress(1, '请选择保存文件夹…');
+                const baseDir = await pickSaveDir();
+                const folderName = getTitleName();
+                let subDir = null;
+                if (baseDir) {
+                    subDir = await baseDir.getDirectoryHandle(folderName, { create: true });
+                    showToast(`📂 将保入「${folderName}」`);
+                } else {
+                    showToast('⚠️ 未选择文件夹，将下载到浏览器默认目录', 4000);
+                }
+                // saveFile 统一入口：有 subDir 用 FSA，否则降级 GM_download
+                const saveFile = (blob, fileName) =>
+                    subDir ? writeBlobToDir(blob, subDir, fileName)
+                        : gmDownloadBlobFallback(blob, `${folderName}/${fileName}`);
+
                 setProgress(2, '获取图片列表…');
                 let imageList = await fetchImageList(u1);
 
@@ -836,10 +864,9 @@
                 }
 
                 const total = imageList.length;
-                const folderName = getTitleName();
 
                 if (mode === 0) {
-                    // ── 不拼页：解码一张立即下载，内存占用最小 ──
+                    // ── 不拼页：解码一张立即保存，内存占用最小 ──
                     for (let i = 0; i < total; i++) {
                         setProgress(
                             Math.round((i / total) * 95) + 2,
@@ -847,12 +874,11 @@
                         );
                         const canvas = await downloadAndDecode(imageList[i]);
                         const blob = await canvasToBlob(canvas);
-                        canvas.width = 0; canvas.height = 0; // 释放 GPU
-                        const name = `${folderName}/page_${String(i + 1).padStart(3, '0')}.jpg`;
-                        await gmDownloadBlob(blob, name);
+                        canvas.width = 0; canvas.height = 0;
+                        await saveFile(blob, `page_${String(i + 1).padStart(3, '0')}.jpg`);
                     }
                 } else {
-                    // ── 拼页模式：先全量解码，再拼页并逐张下载 ──
+                    // ── 拼页模式：先全量解码，再拼页并逐张保存 ──
                     const canvases = [];
                     for (let i = 0; i < total; i++) {
                         setProgress(
@@ -870,18 +896,17 @@
                     for (let i = 0; i < pages.length; i++) {
                         setProgress(
                             68 + Math.round((i / pages.length) * 29),
-                            `下载跨页 ${i + 1} / ${pages.length}…`
+                            `保存跨页 ${i + 1} / ${pages.length}…`
                         );
                         const blob = await canvasToBlob(pages[i]);
                         pages[i].width = 0; pages[i].height = 0;
-                        const name = `${folderName}/spread_${String(i + 1).padStart(3, '0')}.jpg`;
-                        await gmDownloadBlob(blob, name);
+                        await saveFile(blob, `spread_${String(i + 1).padStart(3, '0')}.jpg`);
                     }
                 }
 
                 const count = mode === 0 ? total : Math.ceil(total / 2);
-                setProgress(100, `✅ 完成！${count} 张已保入「${folderName}」文件夹`);
-                showToast(`✅ 完成！保入下载文件夹内「${folderName}」`, 6000);
+                setProgress(100, `✅ 完成！${count} 张已保入「${folderName}」`);
+                showToast(`✅ 完成！已保入「${folderName}」`, 6000);
             } catch (err) {
                 console.error('[Comic-Growl Downloader]', err);
                 showToast('❌ 出错: ' + err.message, 5000);
