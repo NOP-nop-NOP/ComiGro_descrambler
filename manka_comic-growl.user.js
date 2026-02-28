@@ -4,6 +4,8 @@
 // @version      1.3.0
 // @description  自动解码并下载 comic-growl.com 的漫画章节，支持右开书拼页模式
 // @author       manka
+// @homepage     https://github.com/NOP-nop-NOP/ComiGro_descrambler
+// @supportURL   https://github.com/NOP-nop-NOP/ComiGro_descrambler/issues
 // @match        https://comic-growl.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_download
