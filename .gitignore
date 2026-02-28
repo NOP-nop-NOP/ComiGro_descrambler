@@ -1,0 +1,9 @@
+# 敏感信息
+cookies.txt
+
+# 已废弃的 Python 脚本
+ImageGet_comic-growl.py
+
+# 本地输出目录
+output/
+origin/
